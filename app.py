@@ -1,418 +1,658 @@
-# app.py
+import os
 import time
+import uuid
 import random
 from dataclasses import dataclass
-from typing import Optional, List, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
-import pandas as pd
-
 
 # -----------------------------
-# 0) 서버 메모리(간단 리더보드)
-#    Streamlit Cloud는 "외부 DB" 없으면 재시작/재배포 시 초기화됩니다.
+# Optional: Supabase client
 # -----------------------------
+SUPABASE_AVAILABLE = False
+try:
+    from supabase import create_client  # pip install supabase
+    SUPABASE_AVAILABLE = True
+except Exception:
+    SUPABASE_AVAILABLE = False
+
+
+# =============================
+# Quiz: Paris only (10 questions)
+# 난이도: 1 -> 10
+# =============================
+QUESTIONS: List[Dict[str, Any]] = [
+    {
+        "id": 1,
+        "difficulty": 1,
+        "type": "image",
+        "image_url": "https://upload.wikimedia.org/wikipedia/commons/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg",
+        "question": "이 사진 속 랜드마크는?",
+        "options": ["개선문", "에펠탑", "루브르 피라미드", "몽파르나스 타워"],
+        "answer": 1,
+        "base_points": 200,
+    },
+    {
+        "id": 2,
+        "difficulty": 2,
+        "type": "mcq",
+        "question": "파리의 대표적인 강은?",
+        "options": ["라인강", "센강(Seine)", "다뉴브강", "포강"],
+        "answer": 1,
+        "base_points": 250,
+    },
+    {
+        "id": 3,
+        "difficulty": 3,
+        "type": "mcq",
+        "question": "루브르 박물관의 상징으로 유명한 유리 구조물은?",
+        "options": ["유리 돔", "유리 피라미드", "유리 다리", "유리 타워"],
+        "answer": 1,
+        "base_points": 300,
+    },
+    {
+        "id": 4,
+        "difficulty": 4,
+        "type": "mcq",
+        "question": "몽마르트 언덕 위에 있는 하얀 대성당은?",
+        "options": ["노트르담 대성당", "생트샤펠", "사크레쾨르 대성당", "생제르맹데프레 성당"],
+        "answer": 2,
+        "base_points": 380,
+    },
+    {
+        "id": 5,
+        "difficulty": 5,
+        "type": "mcq",
+        "question": "개선문(Arc de Triomphe)이 위치한 광장(또는 로터리)로 가장 잘 알려진 곳은?",
+        "options": ["콩코르드 광장", "바스티유 광장", "샤를 드골 광장(에투알)", "보주 광장"],
+        "answer": 2,
+        "base_points": 450,
+    },
+    {
+        "id": 6,
+        "difficulty": 6,
+        "type": "mcq",
+        "question": "파리 지하철(Métro) 노선도에서 흔히 쓰는 색은 노선별로 다르지만, 표지판/안내에 자주 등장하는 대표색 조합은?",
+        "options": ["검정/노랑", "파랑/하양", "초록/보라", "빨강/주황"],
+        "answer": 1,
+        "base_points": 520,
+    },
+    {
+        "id": 7,
+        "difficulty": 7,
+        "type": "mcq",
+        "question": "파리의 '라탱 지구(Quartier Latin)'는 전통적으로 무엇과 연관이 깊을까?",
+        "options": ["대형 공항", "대학/학문/학생 문화", "항구 물류", "스키 리조트"],
+        "answer": 1,
+        "base_points": 600,
+    },
+    {
+        "id": 8,
+        "difficulty": 8,
+        "type": "mcq",
+        "question": "오르세 미술관(Musée d'Orsay)은 원래 어떤 용도로 지어진 건물일까?",
+        "options": ["기차역", "왕궁", "성당", "극장"],
+        "answer": 0,
+        "base_points": 700,
+    },
+    {
+        "id": 9,
+        "difficulty": 9,
+        "type": "mcq",
+        "question": "파리의 행정구역 '아롱디스망(arrondissement)'은 총 몇 개일까?",
+        "options": ["10개", "12개", "16개", "20개"],
+        "answer": 3,
+        "base_points": 850,
+    },
+    {
+        "id": 10,
+        "difficulty": 10,
+        "type": "mcq",
+        "question": "파리의 유명한 묘지 '페르 라셰즈(Père Lachaise)'가 특히 유명한 이유로 가장 적절한 것은?",
+        "options": ["유럽 최대의 테마파크가 있다", "유명 인물들의 묘가 다수 있다", "파리에서 가장 높은 전망대가 있다", "세계 최대의 쇼핑몰이 있다"],
+        "answer": 1,
+        "base_points": 1000,
+    },
+]
+
+CHECKPOINTS = {3, 6, 9}  # 문제 번호 기준
+
+
+# =============================
+# Scoring
+# - <1초: 최대점수
+# - 1~<10초: 선형 감소(10초에 가까울수록 낮음)
+# - >=10초: 0점
+# =============================
+def time_multiplier(elapsed_sec: float) -> float:
+    if elapsed_sec < 1.0:
+        return 1.0
+    if elapsed_sec < 10.0:
+        # elapsed=1 => 1.0, elapsed=10 => 0.1
+        return 0.1 + (10.0 - elapsed_sec) * (0.9 / 9.0)
+    return 0.0
+
+
+# =============================
+# Storage (Memory / Supabase)
+# =============================
+@dataclass
+class Player:
+    player_id: str
+    name: str
+    age_group: str
+    score: float = 0.0
+    correct_count: int = 0
+    total_time: float = 0.0
+    current_q: int = 0  # 0~10
+    updated_at: float = 0.0
+
+
 @st.cache_resource
-def get_store():
+def _memory_db() -> Dict[str, Any]:
     return {
-        "players": {},   # player_id -> record
-        "lucky_winners": set(),  # 중복 당첨 방지(선택)
+        "players": {},   # player_id -> Player
+        "winners": [],   # list of dict
+        "lucky_draw_lock": False,
+        "lucky_draw_winner": None,
+        "lucky_draw_ts": None,
     }
 
 
-# -----------------------------
-# 1) 문제 데이터 구조
-# -----------------------------
-@dataclass
-class Question:
-    qid: int
-    title: str
-    prompt: str
-    choices: List[str]
-    answer_idx: int
-    explanation: str
-    image_url: Optional[str] = None
-    base_max: int = 800   # 난이도/문제별 최대점수(마지막 문제 크게)
-    base_min: int = 150   # 1~10초 구간의 최저점수(정답일 때)
+class MemoryStore:
+    def __init__(self):
+        self.db = _memory_db()
+
+    def init_player(self, p: Player) -> None:
+        p.updated_at = time.time()
+        self.db["players"][p.player_id] = p
+
+    def upsert_player(self, p: Player) -> None:
+        p.updated_at = time.time()
+        self.db["players"][p.player_id] = p
+
+    def get_leaderboard(self, limit: int = 50) -> List[Player]:
+        players = list(self.db["players"].values())
+        players.sort(key=lambda x: (-x.score, x.total_time, -x.correct_count, x.updated_at))
+        return players[:limit]
+
+    def get_player(self, player_id: str) -> Optional[Player]:
+        return self.db["players"].get(player_id)
+
+    def lucky_draw(self) -> Dict[str, Any]:
+        # 1시간 내 이미 추첨됐으면 재사용
+        now = time.time()
+        if self.db["lucky_draw_winner"] and self.db["lucky_draw_ts"] and (now - self.db["lucky_draw_ts"] < 3600):
+            return self.db["lucky_draw_winner"]
+
+        eligible = [p for p in self.db["players"].values() if p.current_q >= 9]
+        if not eligible:
+            raise RuntimeError("아직 추첨 대상(9번 이상 완료)이 없습니다.")
+
+        winner = random.choice(eligible)
+        result = {
+            "winner_name": winner.name,
+            "age_group": winner.age_group,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.db["lucky_draw_winner"] = result
+        self.db["lucky_draw_ts"] = now
+        self.db["winners"].append(result)
+        return result
+
+    def get_winners(self, limit: int = 10) -> List[Dict[str, Any]]:
+        return list(reversed(self.db["winners"]))[:limit]
 
 
-def build_questions() -> List[Question]:
-    # 이미지 URL은 "예시"입니다. 원하시면 회장님 콘텐츠에 맞게 문제/이미지 세트로 커스터마이징해드릴게요.
-    return [
-        Question(
-            qid=1,
-            title="Q1 (워밍업/이미지)",
-            prompt="이 국기는 어느 나라일까요?",
-            image_url="https://upload.wikimedia.org/wikipedia/en/c/c3/Flag_of_France.svg",
-            choices=["이탈리아", "프랑스", "네덜란드", "러시아"],
-            answer_idx=1,
-            explanation="세로 삼색(파-흰-빨)은 프랑스 국기 트리콜로르!",
-            base_max=600, base_min=120
-        ),
-        Question(
-            qid=2,
-            title="Q2 (가벼운 상식)",
-            prompt="비행기 이륙/착륙 시 가장 기본적으로 안내하는 것은?",
-            choices=["기내식 메뉴 선택", "좌석벨트 착용", "면세품 구매", "좌석 등받이 젖히기"],
-            answer_idx=1,
-            explanation="이륙/착륙 때는 좌석벨트 착용이 기본 안전수칙이에요.",
-            base_max=650, base_min=130
-        ),
-        Question(
-            qid=3,
-            title="Q3 (체감 난이도↑)",
-            prompt="유럽 여행에서 '오버투어리즘'이란 무엇을 뜻할까요?",
-            choices=["관광객이 너무 적어 침체된 상태", "관광객이 과도하게 몰려 지역이 과부하된 상태", "투어 비용이 너무 비싼 상태", "야간 투어가 많은 상태"],
-            answer_idx=1,
-            explanation="관광객 과밀로 주민 삶/환경/인프라에 부담이 커지는 현상입니다.",
-            base_max=750, base_min=150
-        ),
-        Question(
-            qid=4,
-            title="Q4 (이미지/랜드마크)",
-            prompt="이 랜드마크로 가장 유명한 도시는?",
-            image_url="https://upload.wikimedia.org/wikipedia/commons/6/6f/Colosseum_in_Rome%2C_Italy_-_April_2007.jpg",
-            choices=["로마", "파리", "런던", "비엔나"],
-            answer_idx=0,
-            explanation="콜로세움은 로마의 상징이죠.",
-            base_max=900, base_min=170
-        ),
-        Question(
-            qid=5,
-            title="Q5 (여행 꿀지식)",
-            prompt="시차 적응(제트랙) 완화에 가장 도움 되는 행동은?",
-            choices=["도착 즉시 낮잠 4시간", "도착지 현지시간에 맞춰 햇빛 쬐기", "카페인 많이 마시기", "잠을 아예 안 자기"],
-            answer_idx=1,
-            explanation="빛(햇빛)은 생체시계를 리셋하는 가장 강력한 신호예요.",
-            base_max=950, base_min=180
-        ),
-        Question(
-            qid=6,
-            title="Q6 (난이도 중상)",
-            prompt="여행상품에서 '랜드 오퍼레이터(Land Operator)'의 역할에 가장 가까운 것은?",
-            choices=["항공권만 판매", "현지 일정/차량/가이드/호텔 등 지상수배 총괄", "여행 보험만 판매", "환전만 대행"],
-            answer_idx=1,
-            explanation="현지에서 굴러가는 대부분을 설계/운영하는 실무 핵심이에요.",
-            base_max=1100, base_min=200
-        ),
-        Question(
-            qid=7,
-            title="Q7 (논리형)",
-            prompt="A도시(2박) → B도시(1박) → A도시(1박) 동선을 줄이면 가장 먼저 바꿀 것은?",
-            choices=["식사 횟수", "도시 순서/숙박 분배", "여행자 나이", "환율"],
-            answer_idx=1,
-            explanation="이건 동선 최적화 문제라 숙박/이동 구조가 1순위예요.",
-            base_max=1250, base_min=230
-        ),
-        Question(
-            qid=8,
-            title="Q8 (상급/개념)",
-            prompt="퀴즈쇼에서 이탈을 줄이기 위한 가장 직접적인 장치는?",
-            choices=["문제를 더 어렵게", "중간 체크포인트(순위/보상) 설계", "광고를 더 길게", "질문을 더 길게"],
-            answer_idx=1,
-            explanation="3/6/9 체크포인트 + 보상(럭키드로우)은 ‘계속 남을 이유’를 줍니다.",
-            base_max=1500, base_min=260
-        ),
-        Question(
-            qid=9,
-            title="Q9 (상급/승부처 + 럭키드로우 전)",
-            prompt="타이머 점수형 퀴즈에서 '반응속도 불만'을 줄이는 확장 전략으로 적절한 것은?",
-            choices=["문제 수를 100개로", "연령/리그 분리(예: MZ/50+) 또는 핸디캡", "정답을 공개하지 않기", "버튼을 작게 만들기"],
-            answer_idx=1,
-            explanation="리그 분리/핸디캡은 공정성 인식을 크게 올려요.",
-            base_max=1800, base_min=300
-        ),
-        Question(
-            qid=10,
-            title="Q10 (최상급/우승 결정)",
-            prompt="다음 중 '동점자'가 발생했을 때 우승자를 더 잘 가르는 타이브레이커로 좋은 것은?",
-            choices=["닉네임 길이", "총 소요시간(0.01초 단위) 또는 마지막 문제 응답시간", "나이", "접속 브라우저"],
-            answer_idx=1,
-            explanation="총 소요시간/마지막 문제 응답시간은 실력 차이를 더 잘 드러냅니다.",
-            base_max=2500, base_min=400
-        ),
-    ]
+class SupabaseStore:
+    def __init__(self, url: str, key: str):
+        if not SUPABASE_AVAILABLE:
+            raise RuntimeError("supabase 패키지가 설치되어 있지 않습니다. requirements.txt에 supabase를 추가하세요.")
+        self.sb = create_client(url, key)
+
+    def init_player(self, p: Player) -> None:
+        # 참가자 등록 즉시 1줄 생성(핵심: row가 안생기는 문제를 여기서 바로 잡음)
+        payload = {
+            "player_id": p.player_id,
+            "name": p.name,
+            "age_group": p.age_group,
+            "score": float(p.score),
+            "correct_count": int(p.correct_count),
+            "total_time": float(p.total_time),
+            "current_q": int(p.current_q),
+        }
+        self.sb.table("quiz_players").upsert(payload).execute()
+
+    def upsert_player(self, p: Player) -> None:
+        payload = {
+            "player_id": p.player_id,
+            "name": p.name,
+            "age_group": p.age_group,
+            "score": float(p.score),
+            "correct_count": int(p.correct_count),
+            "total_time": float(p.total_time),
+            "current_q": int(p.current_q),
+        }
+        self.sb.table("quiz_players").upsert(payload).execute()
+
+    def get_player(self, player_id: str) -> Optional[Player]:
+        res = self.sb.table("quiz_players").select("*").eq("player_id", player_id).limit(1).execute()
+        data = res.data or []
+        if not data:
+            return None
+        r = data[0]
+        return Player(
+            player_id=r["player_id"],
+            name=r.get("name", ""),
+            age_group=r.get("age_group", ""),
+            score=float(r.get("score", 0) or 0),
+            correct_count=int(r.get("correct_count", 0) or 0),
+            total_time=float(r.get("total_time", 0) or 0),
+            current_q=int(r.get("current_q", 0) or 0),
+            updated_at=time.time(),
+        )
+
+    def get_leaderboard(self, limit: int = 50) -> List[Player]:
+        # 점수 desc, 총시간 asc (동점이면 더 빨리 푼 사람이 우위)
+        res = (
+            self.sb.table("quiz_players")
+            .select("*")
+            .order("score", desc=True)
+            .order("total_time", desc=False)
+            .order("correct_count", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = res.data or []
+        out: List[Player] = []
+        for r in rows:
+            out.append(
+                Player(
+                    player_id=r["player_id"],
+                    name=r.get("name", ""),
+                    age_group=r.get("age_group", ""),
+                    score=float(r.get("score", 0) or 0),
+                    correct_count=int(r.get("correct_count", 0) or 0),
+                    total_time=float(r.get("total_time", 0) or 0),
+                    current_q=int(r.get("current_q", 0) or 0),
+                    updated_at=time.time(),
+                )
+            )
+        return out
+
+    def lucky_draw(self) -> Dict[str, Any]:
+        # 최근 1시간 내 이미 winner가 있으면 그걸 반환(중복 추첨 방지)
+        try:
+            recent = (
+                self.sb.table("quiz_lucky_winners")
+                .select("*")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = recent.data or []
+            if rows:
+                # created_at이 문자열/타임스탬프일 수 있어서 널널하게 처리
+                return {
+                    "winner_name": rows[0].get("winner_name", ""),
+                    "age_group": rows[0].get("age_group", ""),
+                    "created_at": str(rows[0].get("created_at", "")),
+                }
+        except Exception:
+            pass
+
+        eligible = (
+            self.sb.table("quiz_players")
+            .select("*")
+            .gte("current_q", 9)
+            .limit(500)
+            .execute()
+        )
+        players = eligible.data or []
+        if not players:
+            raise RuntimeError("아직 추첨 대상(9번 이상 완료)이 없습니다.")
+
+        w = random.choice(players)
+        payload = {"winner_name": w.get("name", ""), "age_group": w.get("age_group", "")}
+        ins = self.sb.table("quiz_lucky_winners").insert(payload).execute()
+        row = (ins.data or [{}])[0]
+        return {
+            "winner_name": row.get("winner_name", payload["winner_name"]),
+            "age_group": row.get("age_group", payload["age_group"]),
+            "created_at": str(row.get("created_at", "")),
+        }
+
+    def get_winners(self, limit: int = 10) -> List[Dict[str, Any]]:
+        res = (
+            self.sb.table("quiz_lucky_winners")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = res.data or []
+        out = []
+        for r in rows:
+            out.append(
+                {
+                    "winner_name": r.get("winner_name", ""),
+                    "age_group": r.get("age_group", ""),
+                    "created_at": str(r.get("created_at", "")),
+                }
+            )
+        return out
 
 
-# -----------------------------
-# 2) 점수 함수
-# -----------------------------
-def calc_points(correct: bool, elapsed: float, max_points: int, min_points: int) -> int:
-    """elapsed: 초 단위. 0.01초 단위까지 반영(표시/저장)."""
-    if not correct:
-        return 0
-    if elapsed >= 10.0:
-        return 0
-    if elapsed < 1.0:
-        return max_points
-    # 1~10초: 선형 감점(1초에 max, 10초에 min)
-    # t=1 -> 0, t=10 -> 1
-    t = (elapsed - 1.0) / 9.0
-    score = round(max_points - t * (max_points - min_points))
-    return int(max(score, min_points))
+def get_store() -> Tuple[str, Any]:
+    """Return (mode, store). mode in {"supabase","memory"}"""
+    url = st.secrets.get("supabase_url") if hasattr(st, "secrets") else None
+    key = st.secrets.get("supabase_key") if hasattr(st, "secrets") else None
+
+    if url and key:
+        try:
+            return "supabase", SupabaseStore(url, key)
+        except Exception as e:
+            st.warning(f"Supabase 연결 실패 → memory로 전환합니다. (사유: {e})")
+            return "memory", MemoryStore()
+
+    return "memory", MemoryStore()
 
 
-def now_perf():
-    return time.perf_counter()
+# =============================
+# UI Helpers
+# =============================
+def render_leaderboard(store: Any, my_player_id: Optional[str] = None) -> None:
+    st.subheader("🏆 리더보드")
+    lb = store.get_leaderboard(limit=50)
 
+    if not lb:
+        st.info("아직 참가자가 없습니다.")
+        return
 
-def format_sec(x: float) -> str:
-    return f"{x:.2f}s"
-
-
-# -----------------------------
-# 3) 리더보드
-# -----------------------------
-def leaderboard_df(store, age_filter: str = "전체"):
     rows = []
-    for pid, r in store["players"].items():
-        if age_filter != "전체" and r["age_group"] != age_filter:
-            continue
-        rows.append({
-            "닉네임": r["name"],
-            "나이대": r["age_group"],
-            "점수": r["score"],
-            "정답수": r["correct_count"],
-            "총시간(정답제출)": round(r["total_time"], 2),
-            "진행": f'{r["current_q"]}/10',
-        })
-    if not rows:
-        return pd.DataFrame(columns=["닉네임","나이대","점수","정답수","총시간(정답제출)","진행"])
-    df = pd.DataFrame(rows)
-    # 점수 내림차순, 총시간 오름차순(빨리 정확히 푼 사람 우위)
-    df = df.sort_values(by=["점수", "총시간(정답제출)"], ascending=[False, True]).reset_index(drop=True)
-    df.index = df.index + 1
-    df.insert(0, "순위", df.index)
-    return df
+    my_rank = None
+    for i, p in enumerate(lb, start=1):
+        rows.append(
+            {
+                "순위": i,
+                "닉네임": p.name,
+                "리그": p.age_group,
+                "점수": round(p.score, 2),
+                "정답수": p.correct_count,
+                "총소요(초)": round(p.total_time, 2),
+                "진행": f"{p.current_q}/10",
+            }
+        )
+        if my_player_id and p.player_id == my_player_id:
+            my_rank = i
+
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+    if my_rank:
+        st.success(f"내 현재 순위: **{my_rank}위**")
 
 
-def get_rank(df: pd.DataFrame, name: str):
-    if df.empty:
-        return None
-    hit = df.index[df["닉네임"] == name].tolist()
-    return int(df.loc[hit[0], "순위"]) if hit else None
+def reset_question_timer(q_index: int) -> None:
+    # 문제 인덱스가 바뀔 때만 타이머를 세팅(재렌더링으로 리셋되지 않게)
+    if st.session_state.get("timer_q_index") != q_index:
+        st.session_state.timer_q_index = q_index
+        st.session_state.q_start = time.perf_counter()
+
+
+def elapsed_time() -> float:
+    start = st.session_state.get("q_start")
+    if not start:
+        return 999.0
+    return round(time.perf_counter() - start, 2)
+
+
+# =============================
+# App
+# =============================
+st.set_page_config(page_title="Paris Quiz (10)", page_icon="🗼", layout="centered")
+st.title("🗼 Paris Quiz (10문제)")
+mode, store = get_store()
+st.caption(f"저장 모드: **{mode}**  |  채점: **0.01초 단위 시간차등**  |  체크포인트: 3/6/9")
+
+with st.sidebar:
+    st.header("⚙️ 운영 설정(확장용)")
+    st.write("- MZ / 50+ 리그 분리 가능")
+    st.write("- 9번 후 럭키드로우 1회")
+    st.divider()
+    st.write("디버그용(개발 중)")
+    st.write("player_id:", st.session_state.get("player_id"))
+    st.write("q_index:", st.session_state.get("q_index"))
+    st.write("score:", st.session_state.get("score"))
 
 
 # -----------------------------
-# 4) Streamlit UI
+# Session init
 # -----------------------------
-st.set_page_config(page_title="타이머 퀴즈 (Streamlit)", layout="centered")
-
-store = get_store()
-questions = build_questions()
-
-st.title("🌍 타이머 퀴즈 (10문제)")
-
-with st.expander("운영 흐름(15분 설계) / 규칙", expanded=False):
-    st.write(
-        "- 인트로+안내 2~3분 → 10문제 10~15분 → 우승 발표/엔딩 2~3분\n"
-        "- 점수: 1초 미만 최대 / 10초 미만 감점 / 10초 이상 0점\n"
-        "- 3/6/9번 종료 후: 전체 순위 + 내 순위 표시\n"
-        "- 9번 후: 럭키드로우(간단 버전)\n"
-        "- 확장: MZ/50+ 리그 분리 또는 핸디캡 가능"
-    )
-
-# 세션 초기화
 if "started" not in st.session_state:
     st.session_state.started = False
 if "player_id" not in st.session_state:
     st.session_state.player_id = None
 if "q_index" not in st.session_state:
     st.session_state.q_index = 0
-if "q_start_t" not in st.session_state:
-    st.session_state.q_start_t = None
-if "answered" not in st.session_state:
-    st.session_state.answered = False
-if "last_elapsed" not in st.session_state:
-    st.session_state.last_elapsed = None
-if "last_points" not in st.session_state:
-    st.session_state.last_points = 0
-if "last_correct" not in st.session_state:
-    st.session_state.last_correct = False
-if "show_checkpoint" not in st.session_state:
-    st.session_state.show_checkpoint = False
-if "checkpoint_at" not in st.session_state:
-    st.session_state.checkpoint_at = None
-
-
-def ensure_player(name: str, age_group: str):
-    pid = f"{name}:{age_group}"
-    st.session_state.player_id = pid
-    if pid not in store["players"]:
-        store["players"][pid] = {
-            "name": name,
-            "age_group": age_group,
-            "score": 0,
-            "correct_count": 0,
-            "total_time": 0.0,   # 정답 제출까지 걸린 시간 누적(타이브레이커)
-            "current_q": 0,      # 0~10
-        }
-    return pid
+if "score" not in st.session_state:
+    st.session_state.score = 0.0
+if "correct_count" not in st.session_state:
+    st.session_state.correct_count = 0
+if "total_time" not in st.session_state:
+    st.session_state.total_time = 0.0
+if "last_feedback" not in st.session_state:
+    st.session_state.last_feedback = None
+if "await_next" not in st.session_state:
+    st.session_state.await_next = False
 
 
 # -----------------------------
-# 시작 화면
+# Start screen / Registration
 # -----------------------------
 if not st.session_state.started:
-    st.subheader("🎬 참가자 등록")
-    c1, c2 = st.columns(2)
-    with c1:
-        name = st.text_input("닉네임", value="", placeholder="예: 행자언니팬01")
-    with c2:
-        age_group = st.selectbox("리그(나이대)", ["전체", "MZ", "50+"], index=1)
+    st.subheader("🎬 인트로(2~3분) 후 바로 시작 가능")
+    st.write(
+        "10문제(파리) / 총 10~15분 운영을 목표로 설계했습니다.\n\n"
+        "- 1초 미만 정답: 최대점수\n"
+        "- 10초 이상: 0점\n"
+        "- 3/6/9번 문제 후 전체 순위 공개\n"
+        "- 9번 문제 후 럭키드로우(추첨)로 이탈 방지"
+    )
 
-    st.caption("※ 리그를 '전체'로 두면 통합 순위, MZ/50+로 두면 분리 순위처럼 운용 가능합니다.")
+    with st.form("register_form", clear_on_submit=False):
+        nickname = st.text_input("닉네임", max_chars=12, placeholder="예: 행자, 회장님, ParisKing...")
+        age_group = st.selectbox("리그(확장 가능)", ["MZ", "50+", "ALL(통합)"], index=2)
+        start_btn = st.form_submit_button("🚀 퀴즈 시작")
 
-    if st.button("퀴즈 시작", type="primary", disabled=(len(name.strip()) < 2)):
-        pid = ensure_player(name.strip(), age_group)
+    if start_btn:
+        if not nickname.strip():
+            st.error("닉네임을 입력해주세요.")
+            st.stop()
+
+        pid = str(uuid.uuid4())
+        st.session_state.player_id = pid
+        st.session_state.nickname = nickname.strip()
+        st.session_state.age_group = age_group
         st.session_state.started = True
         st.session_state.q_index = 0
-        st.session_state.q_start_t = None
-        st.session_state.answered = False
-        st.session_state.show_checkpoint = False
+        st.session_state.score = 0.0
+        st.session_state.correct_count = 0
+        st.session_state.total_time = 0.0
+        st.session_state.await_next = False
+        st.session_state.last_feedback = None
+
+        # ✅ 참가자 등록 즉시 row 생성(핵심)
+        try:
+            store.init_player(
+                Player(
+                    player_id=pid,
+                    name=st.session_state.nickname,
+                    age_group=st.session_state.age_group,
+                    score=0.0,
+                    correct_count=0,
+                    total_time=0.0,
+                    current_q=0,
+                )
+            )
+            st.success("참가자 등록 완료 ✅")
+        except Exception as e:
+            st.error(f"참가자 저장 실패 ❌ (Supabase/RLS/키 확인 필요): {e}")
+            st.stop()
+
         st.rerun()
 
     st.stop()
 
 
-# 참가자 정보
-player = store["players"][st.session_state.player_id]
-st.write(f"👤 **{player['name']}** / 리그: **{player['age_group']}**")
-st.metric("현재 점수", player["score"])
-st.metric("진행", f"{player['current_q']}/10")
-
-# 리더보드 필터(운영자/참가자 공용)
-age_filter = st.selectbox("리더보드 보기", ["전체", "MZ", "50+"], index=0)
-df_lb = leaderboard_df(store, age_filter=age_filter)
-
 # -----------------------------
-# 체크포인트 표시(3/6/9 이후)
+# Guard: must have player_id
 # -----------------------------
-def show_leaderboard_block(title: str):
-    st.subheader(title)
-    if df_lb.empty:
-        st.info("아직 순위 데이터가 없습니다.")
-        return
-    my_rank = get_rank(df_lb, player["name"])
-    st.dataframe(df_lb, use_container_width=True, hide_index=True)
-    if my_rank is not None:
-        st.success(f"현재 **내 순위: {my_rank}위** (필터: {age_filter})")
-    else:
-        st.warning("내 닉네임이 리더보드에서 보이지 않아요(필터를 '전체'로 바꿔보세요).")
-
-
-if st.session_state.show_checkpoint:
-    cp = st.session_state.checkpoint_at
-    show_leaderboard_block(f"🏁 체크포인트 리더보드 (Q{cp} 종료)")
-    if cp == 9:
-        st.markdown("### 🎁 럭키드로우 (Q9 종료 보너스)")
-        st.caption("간단 버전: 현재 서버에 기록된 참가자 중 1명 랜덤 추첨(리그 필터 적용).")
-        eligible_df = df_lb.copy()
-        if eligible_df.empty:
-            st.info("추첨할 참가자가 없습니다.")
-        else:
-            if st.button("럭키드로우 뽑기 🎲"):
-                # 이미 당첨된 닉네임 제외(선택)
-                pool = [n for n in eligible_df["닉네임"].tolist() if n not in store["lucky_winners"]]
-                if not pool:
-                    st.warning("모든 참가자가 이미 당첨된 상태입니다(서버 기준).")
-                else:
-                    winner = random.choice(pool)
-                    store["lucky_winners"].add(winner)
-                    st.success(f"🎉 당첨자: **{winner}**")
-                    st.write("이제 마지막 Q10으로 우승자를 결정지어봅시다.")
-    if st.button("문제 계속하기 ▶"):
-        st.session_state.show_checkpoint = False
-        st.session_state.checkpoint_at = None
-        st.rerun()
+pid = st.session_state.get("player_id")
+if not pid:
+    st.warning("세션이 초기화되었습니다. 다시 참가자 등록을 해주세요.")
+    st.session_state.started = False
+    st.rerun()
 
 
 # -----------------------------
-# 퀴즈 본게임
+# Quiz flow
 # -----------------------------
-q_idx = st.session_state.q_index
+q_index = st.session_state.q_index
 
-# 종료 처리
-if q_idx >= len(questions):
-    st.subheader("🏆 퀴즈 종료!")
-    show_leaderboard_block("최종 리더보드")
+# Finish
+if q_index >= len(QUESTIONS):
     st.balloons()
-    if st.button("처음으로(다시 참가)"):
-        st.session_state.started = False
-        st.session_state.player_id = None
+    st.header("🎉 종료!")
+    st.write(f"최종 점수: **{round(st.session_state.score, 2)}점**")
+    st.write(f"정답 수: **{st.session_state.correct_count}/10**")
+    st.write(f"총 소요 시간: **{round(st.session_state.total_time, 2)}초**")
+
+    st.divider()
+    render_leaderboard(store, my_player_id=pid)
+
+    st.subheader("🎁 최근 럭키드로우 당첨자")
+    try:
+        winners = store.get_winners(limit=5)
+        if winners:
+            st.dataframe(winners, use_container_width=True, hide_index=True)
+        else:
+            st.info("아직 당첨자가 없습니다.")
+    except Exception as e:
+        st.warning(f"당첨자 조회 실패: {e}")
+
+    if st.button("🔁 다시하기(내 세션만)"):
+        # 새 플레이어로 새 세션
+        for k in ["started", "player_id", "q_index", "score", "correct_count", "total_time", "last_feedback", "await_next"]:
+            if k in st.session_state:
+                del st.session_state[k]
         st.rerun()
+
     st.stop()
 
-q = questions[q_idx]
-st.subheader(q.title)
-st.write(q.prompt)
 
-if q.image_url:
-    st.image(q.image_url, caption="이미지 문제", use_container_width=True)
+# Current question
+q = QUESTIONS[q_index]
+q_no = q_index + 1
 
-# 문제 시작 타이머 세팅(최초 표시 때만)
-if st.session_state.q_start_t is None or player["current_q"] != (q_idx):
-    st.session_state.q_start_t = now_perf()
+st.progress(q_no / 10.0, text=f"진행: {q_no}/10")
+st.subheader(f"Q{q_no}. (난이도 {q['difficulty']})")
 
-# 선택지
-choice = st.radio(
-    "정답을 선택하세요",
-    options=list(range(len(q.choices))),
-    format_func=lambda i: q.choices[i],
-    key=f"choice_{q.qid}",
-    disabled=st.session_state.answered,
-)
+if q.get("type") == "image" and q.get("image_url"):
+    st.image(q["image_url"], caption="이미지 문제", use_container_width=True)
 
-# 제출 버튼
-submit = st.button("제출", type="primary", disabled=st.session_state.answered)
+st.write(q["question"])
 
-if submit:
-    elapsed = now_perf() - st.session_state.q_start_t
-    elapsed = round(elapsed, 2)  # 0.01초 단위
-    correct = (choice == q.answer_idx)
+reset_question_timer(q_index)
 
-    pts = calc_points(correct, elapsed, q.base_max, q.base_min)
-
-    # 플레이어 기록 업데이트
-    if correct:
-        player["score"] += pts
-        player["correct_count"] += 1
-        player["total_time"] += elapsed  # 타이브레이커
-    player["current_q"] = q_idx + 1
-
-    # 세션 기록
-    st.session_state.answered = True
-    st.session_state.last_elapsed = elapsed
-    st.session_state.last_points = pts
-    st.session_state.last_correct = correct
-
-# 제출 결과 표시
-if st.session_state.answered:
-    elapsed = st.session_state.last_elapsed
-    correct = st.session_state.last_correct
-    pts = st.session_state.last_points
-
-    st.write("---")
-    st.write(f"⏱️ 응답시간: **{format_sec(elapsed)}**")
-    if correct:
-        st.success(f"✅ 정답! +{pts}점")
+# If we are in "feedback" state, show feedback and next button
+if st.session_state.await_next:
+    fb = st.session_state.last_feedback or {}
+    if fb.get("correct"):
+        st.success(f"정답 ✅ (+{fb.get('gained', 0)}점)  |  소요 {fb.get('elapsed', 0)}초")
     else:
-        st.error("❌ 오답! (이번 문제 점수 0점)")
-        st.info(f"정답: **{q.choices[q.answer_idx]}**")
+        st.error(f"오답 ❌ (0점)  |  소요 {fb.get('elapsed', 0)}초  |  정답: {fb.get('correct_answer_text')}")
 
-    with st.expander("해설 보기", expanded=True):
-        st.write(q.explanation)
+    # 체크포인트(3/6/9): 리더보드 공개
+    if q_no in CHECKPOINTS:
+        st.divider()
+        render_leaderboard(store, my_player_id=pid)
 
-    # 다음 문제
-    if st.button("다음 문제 ▶"):
-        # 체크포인트: 3/6/9에서 리더보드 띄우기
-        next_q_num = q_idx + 1
-        if next_q_num in [3, 6, 9]:
-            st.session_state.show_checkpoint = True
-            st.session_state.checkpoint_at = next_q_num
+    # 9번 이후 럭키드로우
+    if q_no == 9:
+        st.divider()
+        st.subheader("🎲 럭키드로우(9번 종료 후)")
+        if st.button("🎁 추첨 실행(1회)", type="primary"):
+            try:
+                w = store.lucky_draw()
+                st.success(f"당첨자: **{w['winner_name']}**  |  리그: **{w['age_group']}**")
+                st.caption(f"기록시간: {w.get('created_at', '')}")
+            except Exception as e:
+                st.error(f"추첨 실패: {e}")
+
+        try:
+            winners = store.get_winners(limit=5)
+            if winners:
+                st.write("최근 당첨 기록")
+                st.dataframe(winners, use_container_width=True, hide_index=True)
+        except Exception:
+            pass
+
+    if st.button("➡️ 다음 문제", type="primary"):
+        st.session_state.await_next = False
+        st.session_state.last_feedback = None
         st.session_state.q_index += 1
-        st.session_state.q_start_t = None
-        st.session_state.answered = False
         st.rerun()
-else:
-    st.caption("정답 선택 후 '제출'을 누르면 시간 기반 점수가 계산됩니다.")
+
+    st.stop()
+
+
+# Answer form (prevents rerun until submit)
+with st.form(f"q_form_{q_no}", clear_on_submit=False):
+    choice = st.radio("정답을 선택하세요", q["options"], index=None)
+    submitted = st.form_submit_button("✅ 제출")
+
+if submitted:
+    if choice is None:
+        st.warning("보기 중 하나를 선택한 뒤 제출하세요.")
+        st.stop()
+
+    elapsed = elapsed_time()
+    is_correct = (q["options"].index(choice) == q["answer"])
+
+    gained = 0.0
+    if is_correct:
+        mult = time_multiplier(elapsed)
+        gained = round(q["base_points"] * mult, 2)
+
+    # Update session totals
+    st.session_state.total_time = round(st.session_state.total_time + elapsed, 2)
+    if is_correct:
+        st.session_state.score = round(st.session_state.score + gained, 2)
+        st.session_state.correct_count += 1
+
+    # Persist
+    try:
+        store.upsert_player(
+            Player(
+                player_id=pid,
+                name=st.session_state.nickname,
+                age_group=st.session_state.age_group,
+                score=float(st.session_state.score),
+                correct_count=int(st.session_state.correct_count),
+                total_time=float(st.session_state.total_time),
+                current_q=int(q_no),  # 현재까지 완료한 문제 수
+            )
+        )
+    except Exception as e:
+        st.error(f"저장 실패 ❌ (RLS/정책/키/테이블명 확인): {e}")
+        st.stop()
+
+    # Feedback state
+    st.session_state.last_feedback = {
+        "correct": is_correct,
+        "elapsed": elapsed,
+        "gained": gained,
+        "correct_answer_text": q["options"][q["answer"]],
+    }
+    st.session_state.await_next = True
+    st.rerun()
