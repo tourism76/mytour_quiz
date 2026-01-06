@@ -89,8 +89,8 @@ if "correct" not in st.session_state: st.session_state.correct = 0
 # [화면 1] 메인 인트로
 # [화면 1] 메인 인트로
 if st.session_state.step == "intro":
-    # 업로드한 파일 이름이 main_bg.png 라면 아래와 같이 수정!
-    st.image("main_bg.png", use_container_width=True) 
+    # 업로드한 파일 이름이 main_bg래와 같이 수정!
+    st.image("main_bg", use_container_width=True) 
     
     st.title("""🌍 마이투어유니버스 : 티퀴즈(T-Quiz)")
     # ... 이하 동일
