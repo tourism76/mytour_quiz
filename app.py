@@ -87,12 +87,13 @@ if "score" not in st.session_state: st.session_state.score = 0
 if "correct" not in st.session_state: st.session_state.correct = 0
 
 # [화면 1] 메인 인트로
+# [화면 1] 메인 인트로
 if st.session_state.step == "intro":
-    st.image("https://images.unsplash.com/photo-1488646953014-85cb44e25828?w=800&q=80", use_container_width=True) # 세계여행 랜드마크 이미지
+    # 업로드한 파일 이름이 main_bg.png 라면 아래와 같이 수정!
+    st.image("main_bg.png.png", use_container_width=True) 
     
     st.title("🌍 마이투어유니버스 : 티퀴즈(T-Quiz)")
-    
-    st.markdown("""
+    # ... 이하 동일
     ### "유재석은 '유퀴즈'를 하고, 마이투어유니버스는 '티퀴즈(T-Quiz)'를 합니다!"
     당신의 여행 지식을 뽐내고 실시간 랭킹에 도전하세요. 
     **빨리 맞힐수록 점수가 올라갑니다! (10초 카운트다운)**
