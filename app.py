@@ -92,7 +92,7 @@ if st.session_state.step == "intro":
     # 업로드한 파일 이름이 main_bg.png 라면 아래와 같이 수정!
     st.image("main_bg.png.png", use_container_width=True) 
     
-    st.title("🌍 마이투어유니버스 : 티퀴즈(T-Quiz)")
+    st.title("""🌍 마이투어유니버스 : 티퀴즈(T-Quiz)")
     # ... 이하 동일
     ### "유재석은 '유퀴즈'를 하고, 마이투어유니버스는 '티퀴즈(T-Quiz)'를 합니다!"
     당신의 여행 지식을 뽐내고 실시간 랭킹에 도전하세요. 
